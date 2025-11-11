@@ -6,6 +6,7 @@
 #include <memory>
 #include <cstdint>
 #include <cstdlib>
+#include <sstream>
 
 void execute( int argc, char **argv ) {
   std::filesystem::path p( argv[1] );

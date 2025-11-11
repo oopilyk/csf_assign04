@@ -13,7 +13,16 @@ void swap( int64_t *arr, unsigned long i, unsigned long j );
 unsigned long partition( int64_t *arr, unsigned long start, unsigned long end );
 int quicksort( int64_t *arr, unsigned long start, unsigned long end, unsigned long par_threshold );
 
-// TODO: declare additional helper functions if needed
+typedef struct {
+  pid_t pid;
+  int waited;
+  int wait_status;
+  int fork_failed;
+} child_state_t;
+
+static child_state_t quicksort_spawn( int64_t *arr, unsigned long start, unsigned long end, unsigned long par_threshold );
+static int child_wait( child_state_t *child );
+static int child_succeeded( const child_state_t *child );
 
 int main( int argc, char **argv ) {
   unsigned long par_threshold;
@@ -25,15 +34,44 @@ int main( int argc, char **argv ) {
   int fd;
 
   // open the named file
-  // TODO: open the named file
+  fd = open( argv[1], O_RDWR );
+  if ( fd < 0 ) {
+    perror( "open" );
+    exit( 1 );
+  }
 
   // determine file size and number of elements
   unsigned long file_size, num_elements;
-  // TODO: determine the file size and number of elements
+  struct stat st;
+  if ( fstat( fd, &st ) != 0 ) {
+    perror( "fstat" );
+    close( fd );
+    exit( 1 );
+  }
+
+  if ( st.st_size % sizeof(int64_t) != 0 ) {
+    fprintf( stderr, "Error: file size is not a multiple of %zu bytes\n", sizeof(int64_t) );
+    close( fd );
+    exit( 1 );
+  }
+
+  file_size = (unsigned long)st.st_size;
+  num_elements = file_size / sizeof(int64_t);
 
   // mmap the file data
   int64_t *arr;
-  // TODO: mmap the file data
+  arr = mmap( NULL, file_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+  if ( arr == MAP_FAILED ) {
+    perror( "mmap" );
+    close( fd );
+    exit( 1 );
+  }
+
+  if ( close( fd ) != 0 ) {
+    perror( "close" );
+    munmap( arr, file_size );
+    exit( 1 );
+  }
 
   // Sort the data!
   int success;
@@ -44,7 +82,10 @@ int main( int argc, char **argv ) {
   }
 
   // Unmap the file data
-  // TODO: unmap the file data
+  if ( munmap( arr, file_size ) != 0 ) {
+    perror( "munmap" );
+    exit( 1 );
+  }
 
   return 0;
 }
@@ -177,11 +218,67 @@ int quicksort( int64_t *arr, unsigned long start, unsigned long end, unsigned lo
 
   // Recursively sort the left and right partitions
   int left_success, right_success;
-  // TODO: modify this code so that the recursive calls execute in child processes
-  left_success = quicksort( arr, start, mid, par_threshold );
-  right_success = quicksort( arr, mid + 1, end, par_threshold );
+  child_state_t left_child = quicksort_spawn( arr, start, mid, par_threshold );
+  child_state_t right_child = quicksort_spawn( arr, mid + 1, end, par_threshold );
+
+  left_success = child_wait( &left_child ) && child_succeeded( &left_child );
+  right_success = child_wait( &right_child ) && child_succeeded( &right_child );
 
   return left_success && right_success;
 }
 
-// TODO: define additional helper functions if needed
+static child_state_t quicksort_spawn( int64_t *arr, unsigned long start, unsigned long end, unsigned long par_threshold ) {
+  child_state_t info;
+  info.waited = 0;
+  info.wait_status = 0;
+  info.fork_failed = 0;
+
+  pid_t pid = fork();
+  if ( pid == 0 ) {
+    int ok = quicksort( arr, start, end, par_threshold );
+    _exit( ok ? 0 : 1 );
+  } else if ( pid < 0 ) {
+    info.pid = -1;
+    info.fork_failed = 1;
+  } else {
+    info.pid = pid;
+  }
+
+  return info;
+}
+
+static int child_wait( child_state_t *child ) {
+  if ( child->fork_failed )
+    return 0;
+
+  if ( child->waited )
+    return 1;
+
+  int status;
+  pid_t rc = waitpid( child->pid, &status, 0 );
+  if ( rc < 0 ) {
+    child->waited = 1;
+    child->wait_status = -1;
+    return 0;
+  }
+
+  child->waited = 1;
+  child->wait_status = status;
+  return 1;
+}
+
+static int child_succeeded( const child_state_t *child ) {
+  if ( child->fork_failed )
+    return 0;
+
+  if ( !child->waited )
+    return 0;
+
+  if ( child->wait_status == -1 )
+    return 0;
+
+  if ( !WIFEXITED( child->wait_status ) )
+    return 0;
+
+  return WEXITSTATUS( child->wait_status ) == 0;
+}
